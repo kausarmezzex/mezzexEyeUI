@@ -34,36 +34,6 @@ TASK_ID_MAP = {}  # To map task names to their IDs
 SCREENSHOT_ENABLED = False  # Flag to control screenshot functionality
 UPDATE_TASK_LIST_FLAG = False  # Flag to control task list updating
 
-# URL for external time API
-TIME_API_URL = "http://worldtimeapi.org/api/timezone/Etc/UTC"
-
-def get_external_time():
-    try:
-        response = requests.get(TIME_API_URL)
-        if response.status_code == 200:
-            time_data = response.json()
-            external_time_str = time_data['datetime']
-            external_time = datetime.fromisoformat(external_time_str.replace('Z', '+00:00'))
-            return external_time
-        else:
-            print(f"Failed to fetch external time: {response.status_code}")
-            return None
-    except requests.exceptions.RequestException as e:
-        print(f"Request exception while fetching external time: {e}")
-        return None
-
-def is_system_time_valid():
-    external_time = get_external_time()
-    if not external_time:
-        return False
-
-    system_time = datetime.now(pytz.utc)
-    time_difference = abs((system_time - external_time).total_seconds())
-    # Allow a difference of up to 5 minutes
-    if time_difference > 300:
-        return False
-    return True
-
 def login(username, password):
     url = "https://localhost:7045/api/Auth/login"
     data = {"username": username, "password": password}
@@ -79,16 +49,16 @@ def login(username, password):
                 USER_ID = response_json.get("userId")
                 SCREENSHOT_ENABLED = True
                 print(f"UserId fetched: {USER_ID}")
-                return USERNAME, USER_ID
+                return USERNAME, USER_ID, response_json.get("server_time")
             else:
                 print(f"Unexpected response: {response_json}")
-                return None, None
+                return None, None, None
         else:
             print(f"Login failed with status code: {response.status_code}, response: {response.text}")
-            return None, None
+            return None, None, None
     except requests.exceptions.RequestException as e:
         print(f"Request exception: {e}")
-        return None, None
+        return None, None, None
 
 def fetch_tasks():
     url = "https://localhost:7045/api/Data/getTasks"
@@ -176,7 +146,7 @@ def on_login_click():
     global TOKEN, USERNAME, USER_ID
     username = username_entry.get()
     password = password_entry.get()
-    USERNAME, USER_ID = login(username, password)
+    USERNAME, USER_ID, server_time = login(username, password)
     if USERNAME:
         show_task_management_screen(USERNAME, USER_ID)
         threading.Thread(target=start_scheduled_tasks).start()
@@ -296,7 +266,7 @@ def show_task_management_screen(username, user_id):
 
 def on_task_selected(task_type_combobox, task_type_entry):
     selected_task = task_type_combobox.get()
-    if (selected_task == "Other"):
+    if selected_task == "Other":
         task_type_entry.grid()
     else:
         task_type_entry.grid_remove()
@@ -305,11 +275,6 @@ def start_task(task_type_combobox, task_type_entry, comment_entry):
     global TASKS
     if STAFF_IN_TIME is None:
         staff_in()
-
-    # Validate system time before starting a task
-    if not is_system_time_valid():
-        messagebox.showerror("Time Error", "System time has been altered. Please correct the time and try again.")
-        return
 
     # Check if there are any running tasks
     if RUNNING_TASKS:
@@ -326,28 +291,23 @@ def start_task(task_type_combobox, task_type_entry, comment_entry):
         return
 
     task_id = TASK_ID_MAP.get(task_type, 1)  # Get the TaskId for the selected task or default to 1 if not found
-    task = {"task_type": task_type, "comment": comment, "start_time": datetime.now(), "task_id": task_id}
-    TASKS.append(task)
+    task = {"task_type": task_type, "comment": comment, "task_id": task_id}
     save_task(task)
-
-    task_id = len(TASKS) - 1
-    start_task_record(task_id)
-    task_type_combobox.set("Select Task Type")  # Reset combobox text
-    task_type_entry.delete(0, tk.END)
-    comment_entry.delete(0, tk.END)
-    update_task_list()
 
 def save_task(task):
     url = "https://localhost:7045/api/Data/saveTaskTimer"
     data = {
-        "UserId": USER_ID,  # Use the fetched UserId
-        "TaskId": task["task_id"],  # Use the selected TaskId from TASK_ID_MAP
+        "UserId": USER_ID,
+        "TaskId": task["task_id"],
         "TaskComment": task["comment"]
     }
     try:
         response = requests.post(url, json=data, verify=False)
         if response.status_code == 200:
-            print("Task saved successfully")
+            response_json = response.json()
+            task["start_time"] = response_json.get("server_time")  # Get server time
+            print("Task saved successfully with server time")
+            start_task_record(task)
         else:
             print(f"Failed to save task: {response.status_code}, response: {response.text}")
     except requests.exceptions.RequestException as e:
@@ -355,30 +315,24 @@ def save_task(task):
 
 def save_staff_in_time():
     global STAFF_IN_TIME, STAFF_ID, SCREENSHOT_ENABLED
-    STAFF_IN_TIME = datetime.now()
     SCREENSHOT_ENABLED = True
     data = {
-        "staffInTime": STAFF_IN_TIME.isoformat(),
+        "staffInTime": None,
         "staffOutTime": None,
-        "UserId": USER_ID  # Include the UserId in the staff data
+        "UserId": USER_ID
     }
     url = "https://localhost:7045/api/Data/saveStaff"
     try:
         response = requests.post(url, json=data, verify=False)
-        print(f"Response status code: {response.status_code}")  # Debugging info
-        print(f"Response content: {response.content}")  # Print the entire response content for debugging
-        
         if response.status_code == 200:
             response_json = response.json()
-            print(f"Response JSON: {response_json}")  # Debugging info
-            
             if response_json.get("message") == "Staff data saved successfully":
                 print("Staff in time saved successfully")
-                STAFF_ID = response_json.get("staffId")  # Ensure the key matches 'staffId'
-                print(f"StaffId fetched: {STAFF_ID}")  # Debugging info
-                
-                # Update UI elements
-                staff_in_time_label_reference.configure(text=f"Staff In Time: {STAFF_IN_TIME.strftime('%Y-%m-%d %H:%M:%S')}")
+                STAFF_ID = response_json.get("staffId")
+                STAFF_IN_TIME = response_json.get("server_time")  # Get server time
+                print(f"StaffId fetched: {STAFF_ID}")
+                print(f"Server time: {STAFF_IN_TIME}")
+                staff_in_time_label_reference.configure(text=f"Staff In Time: {STAFF_IN_TIME}")
                 staff_in_button_reference.configure(state=tk.DISABLED)
             else:
                 print(f"Unexpected response message: {response_json.get('message')}")
@@ -389,41 +343,37 @@ def save_staff_in_time():
 
 def update_staff_out_time():
     global STAFF_ID, SCREENSHOT_ENABLED
-    if STAFF_IN_TIME is None:
-        print("Staff in time not recorded.")
-        return
-    
     if STAFF_ID is None:
         print("Staff ID not recorded.")
         return
     
     SCREENSHOT_ENABLED = False
-    staff_out_time = datetime.now()
     data = {
-        "staffInTime": STAFF_IN_TIME.isoformat(),
-        "staffOutTime": staff_out_time.isoformat(),
-        "UserId": USER_ID,  # Include the UserId in the staff data
-        "Id": STAFF_ID  # Include the StaffId to update the correct record
+        "staffInTime": STAFF_IN_TIME,
+        "staffOutTime": None,
+        "UserId": USER_ID,
+        "Id": STAFF_ID
     }
     url = "https://localhost:7045/api/Data/updateStaff"
     
-    print(f"Sending PUT request to {url} with data: {data}")  # Debugging info
-    
     try:
         response = requests.put(url, json=data, verify=False)
-        print(f"Response status code: {response.status_code}")  # Debugging info
         if response.status_code == 200:
-            print("Staff out time updated successfully")
+            response_json = response.json()
+            staff_out_time = response_json.get("server_time")  # Get server time
+            print("Staff out time updated successfully with server time")
+            print(f"Server time: {staff_out_time}")
         else:
             print(f"Failed to update staff out time: {response.status_code}, response: {response.text}")
     except requests.exceptions.RequestException as e:
         print(f"Request exception: {e}")
 
-def start_task_record(task_id):
-    task = TASKS[task_id]
+def start_task_record(task):
     start_time = task["start_time"]
     start_time_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
 
+    task_id = len(TASKS)
+    TASKS.append(task)
     RUNNING_TASKS[task_id] = {
         "staff_name": USERNAME,
         "task_type": task["task_type"],
@@ -431,6 +381,11 @@ def start_task_record(task_id):
         "start_time": start_time_str,
         "working_time": "00:00:00"
     }
+
+    task_type_combobox.set("Select Task Type")  # Reset combobox text
+    task_type_entry.delete(0, tk.END)
+    comment_entry.delete(0, tk.END)
+    update_task_list()
 
 def end_task(task_id):
     task = RUNNING_TASKS.pop(int(task_id))
@@ -494,10 +449,6 @@ def on_treeview_click(event):
         end_task(task_id)
 
 def staff_in():
-    # Validate system time before staff in
-    if not is_system_time_valid():
-        messagebox.showerror("Time Error", "System time has been altered. Please correct the time and try again.")
-        return
     save_staff_in_time()
 
 def staff_out():
